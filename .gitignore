@@ -1,0 +1,13 @@
+# >>> GitDevCore (gestionado) >>>
+.gitdevcore
+config.gitdevcore
+.gdc-*.tmp
+.cfg-*.tmp
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+# <<< GitDevCore <<<
