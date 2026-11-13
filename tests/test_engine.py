@@ -65,6 +65,11 @@ class T(unittest.TestCase):
         self.assertTrue(wait(lambda: self.eng.status(c.id).state == S.ERROR))
         self.assertEqual(self.eng.status(c.id).exit_code, 3)
 
+    def test_error_message_carries_stderr(self):
+        c = self.cfg(args='-c "import sys;sys.stderr.write(\'ModuleNotFoundError: No module named dash\\n\');sys.exit(1)"')
+        st = self.eng.start(c)
+        self.assertEqual(st.state, S.ERROR); self.assertIn("No module named dash", st.message)
+
     def test_immediate_failure_never_running(self):
         c = self.cfg(args='-c "import sys;sys.exit(2)"')
         self.assertEqual(self.eng.start(c).state, S.ERROR)

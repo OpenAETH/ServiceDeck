@@ -38,8 +38,8 @@ def main(page: ft.Page):
     page.padding = 0
     page.theme_mode = ft.ThemeMode.DARK
     page.theme = ft.Theme(font_family="Inter")
-    page.window.width, page.window.height = 1280, 860
-    page.window.min_width, page.window.min_height = 420, 600
+    page.window.width, page.window.height = 1180, 720
+    page.window.min_width, page.window.min_height = 380, 520
     dash = Dashboard(page, registry, engine)
     page.window.prevent_close = True
     page.window.on_event = dash.on_window_event

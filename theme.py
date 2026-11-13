@@ -37,13 +37,15 @@ def icon_button(glyph, tooltip, on_click, disabled=False):
     )
 
 
-def panel(content, header=None):
+def panel(content, header=None, fill=False):
     kids = []
     if header is not None:
         kids.append(ft.Container(header, padding=ft.Padding.symmetric(vertical=15, horizontal=17),
                                  border=ft.Border.only(bottom=ft.BorderSide(1, LINE))))
+    if fill:
+        content.expand = True
     kids.append(content)
-    return ft.Container(ft.Column(kids, spacing=0), bgcolor=PANEL,
+    return ft.Container(ft.Column(kids, spacing=0, expand=fill), bgcolor=PANEL,
                         border=ft.Border.all(1, LINE), border_radius=9)
 
 

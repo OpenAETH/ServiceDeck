@@ -125,7 +125,7 @@ class Configurator:
                         ft.Text("Popen / Managed Process", color=T.GREEN, size=11)], spacing=6),
             ], spacing=3), bgcolor="#102432", border=ft.Border.all(1, "#214454"), border_radius=6, padding=11),
             err,
-        ], spacing=14, scroll=ft.ScrollMode.AUTO, width=620, height=560)
+        ], spacing=14, scroll=ft.ScrollMode.AUTO, width=620, height=min(560, max(320, int(self.page.height or 800) - 200)))
 
         dlg = ft.AlertDialog(
             modal=True, bgcolor=T.MODAL_BG, shape=ft.RoundedRectangleBorder(radius=12),

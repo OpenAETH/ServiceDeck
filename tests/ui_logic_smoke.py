@@ -8,7 +8,7 @@ from dashboard import Dashboard
 
 d = tempfile.mkdtemp(); work = tempfile.mkdtemp(); open(work+"/app.py","w").write("import subprocess,sys,time\nsubprocess.Popen([sys.executable,\"-c\",\"import time;time.sleep(600)\"])\nprint(\"hello\",flush=True);time.sleep(600)\n")
 reg = ServiceRegistry(d + "/services.json"); eng = ProcessEngine(d); reg.set_lock_guard(eng.is_active)
-page = MagicMock(); page.window = MagicMock()
+page = MagicMock(); page.window = MagicMock(); page.width = 1280; page.height = 720
 dash = Dashboard(page, reg, eng); root = dash.build()
 shown = []; page.show_dialog.side_effect = shown.append
 dash.configurator.open()                       # construye el modal completo
@@ -29,7 +29,7 @@ save = [c for c in walk(dlg) if isinstance(c, ft.Container) and isinstance(c.con
 save.on_click(None)
 cfg = reg.list()[0]; print("saved:", cfg.alias, cfg.id)
 # toggle real
-sw = [c for c in walk(dash.list_col) if isinstance(c, ft.Switch)][0]
+sw = [c for c in walk(dash.list_view) if isinstance(c, ft.Switch)][0]
 sw.on_change(MagicMock(control=sw)); 
 for _ in range(50):
     st = eng.status(cfg.id)
@@ -37,7 +37,7 @@ for _ in range(50):
     time.sleep(0.1)
 print("state:", st.state.value, "pid:", st.pid, "alive:", psutil.pid_exists(st.pid))
 time.sleep(0.3); dash.refresh()
-sw = [c for c in walk(dash.list_col) if isinstance(c, ft.Switch)][0]; print("switch value after confirm:", sw.value)
+sw = [c for c in walk(dash.list_view) if isinstance(c, ft.Switch)][0]; print("switch value after confirm:", sw.value)
 kids = psutil.Process(st.pid).children(recursive=True); print("children:", len(kids))
 print("log:", eng.read_log(cfg.id).splitlines()[-1])
 sw.on_change(MagicMock(control=sw)); time.sleep(1.5)

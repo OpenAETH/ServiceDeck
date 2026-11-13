@@ -353,7 +353,11 @@ class ProcessEngine:
         elif code in (0, None):
             self._set(m, ServiceState.STOPPED, f"Finalizó (código {code})", "info", pid=None)
         else:
-            self._set(m, ServiceState.ERROR, f"Cierre inesperado (código {code})", "error", pid=None)
+            tail = self._err_tail(m.cfg.id, 6)
+            hint = f": {tail[-1][:160]}" if tail else " (ver pestaña LOG / stderr)"
+            self._set(m, ServiceState.ERROR, f"Cierre inesperado (código {code}){hint}", "error", pid=None)
+            for line in tail:
+                self._log(m, "stderr> " + line[:200], "error")
         self._save_runtime()
         m.exited.set()
         unexpected = (not requested) and code not in (0, None)
@@ -386,6 +390,20 @@ class ProcessEngine:
                 os.killpg(m.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+
+    def _err_tail(self, service_id: str, n: int = 6) -> List[str]:
+        """Últimas líneas no vacías de stderr de la ejecución actual (diagnóstico)."""
+        path = os.path.join(self.log_dir, f"{service_id}.err.log")
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 16 * 1024))
+                text = f.read().decode("utf-8", "replace")
+        except OSError:
+            return []
+        text = text.rsplit("=== ", 1)[-1]            # solo desde el último start
+        lines = [l.rstrip() for l in text.splitlines()[1:] if l.strip()]
+        return lines[-n:]
 
     @staticmethod
     def _close_files(m: _Managed):
