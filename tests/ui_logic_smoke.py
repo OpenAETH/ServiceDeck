@@ -24,7 +24,7 @@ def walk(c):
 tfs = {c.label: c for c in walk(dlg) if isinstance(c, (ft.TextField, ft.Dropdown)) and getattr(c,"label",None)}
 tfs["Service Name"].value = "Mi Servicio"; tfs["Service Name"].on_change(None)
 print("alias auto:", tfs["UI Alias / Binding ID"].value)
-tfs["Executable"].value = sys.executable; tfs["Arguments"].value = "app.py"; tfs["Working Directory"].value = work
+tfs["Executable (ruta completa recomendada)"].value = sys.executable; tfs["Arguments"].value = "app.py"; tfs["Working Directory"].value = work
 save = [c for c in walk(dlg) if isinstance(c, ft.Container) and isinstance(c.content, ft.Text) and "Save" in (c.content.value or "")][0]
 save.on_click(None)
 cfg = reg.list()[0]; print("saved:", cfg.alias, cfg.id)

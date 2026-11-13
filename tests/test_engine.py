@@ -106,6 +106,32 @@ class T(unittest.TestCase):
         self.eng.start(c)
         self.assertTrue(wait(lambda: sum(1 for e in self.events if e.kind=="state" and e.status.state==S.STARTING) >= 2, 12))
 
+class Sh(unittest.TestCase):
+    def test_interpreters(self):
+        import interpreters
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "app.py"), "w").write("import os, json\nimport definitely_not_installed_xyz\nfrom flask_nope import x\nimport local_mod\n")
+        open(os.path.join(d, "local_mod.py"), "w").write("")
+        self.assertEqual(interpreters.script_imports(d, "app.py"), ["definitely_not_installed_xyz", "flask_nope"])
+        r = interpreters.probe(sys.executable, ["os", "definitely_not_installed_xyz"], d)
+        self.assertTrue(r.ok); self.assertEqual(r.missing, ["definitely_not_installed_xyz"])
+        found = interpreters.discover(d, "app.py")
+        self.assertTrue(any(os.path.realpath(i.path) == os.path.realpath(sys.executable) for i in found))
+        self.assertFalse(interpreters.probe("/no/such/python", [], d).ok)
+
+    @unittest.skipIf(os.name == "nt", "bash")
+    def test_shell_bash_tree_kill(self):
+        d = tempfile.mkdtemp(); w = os.path.join(d, "w"); os.makedirs(w)
+        with open(os.path.join(w, "parent.py"), "w") as f: f.write(PARENT)
+        eng = ProcessEngine(os.path.join(d, "data"))
+        c = ServiceConfig(id="svc_sh", name="S", alias="sh", executable=sys.executable, args="parent.py", cwd=w, shell="bash")
+        st = eng.start(c); self.assertEqual(st.state, S.RUNNING)
+        self.assertTrue(wait(lambda: "child up" in eng.read_log(c.id)))
+        pids = [st.pid] + [k.pid for k in psutil.Process(st.pid).children(recursive=True)]
+        eng.stop(c.id)
+        self.assertTrue(wait(lambda: not any(psutil.pid_exists(p) and psutil.Process(p).status() != psutil.STATUS_ZOMBIE for p in pids)))
+        eng.shutdown()
+
 class R(unittest.TestCase):
     def test_registry(self):
         d = tempfile.mkdtemp(); r = ServiceRegistry(os.path.join(d, "services.json"))
@@ -114,6 +140,7 @@ class R(unittest.TestCase):
         self.assertEqual(r.unique_alias("Prompt Forge"), "prompt_forge_2")
         with self.assertRaises(RegistryError): r.create(data)            # alias duplicado
         with self.assertRaises(RegistryError): r.create({**data, "alias": "Bad Alias", "name": "x"})
+        with self.assertRaises(RegistryError): r.create({**data, "name": "z", "alias": "z", "shell": "zsh"})
         u = r.update(c.id, {**data, "name": "Renombrado", "id": "hack"})   # id inmutable
         self.assertEqual(u.id, c.id); self.assertEqual(u.alias, "prompt_forge")
         r2 = ServiceRegistry(os.path.join(d, "services.json")); self.assertEqual(r2.list()[0].name, "Renombrado")

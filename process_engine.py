@@ -252,6 +252,35 @@ class ProcessEngine:
             raise FileNotFoundError(f"Ejecutable no encontrado: {exe}")
         return [found] + split_args(cfg.args)
 
+    def _build_cmd(self, cfg: ServiceConfig, env: dict):
+        """Directo (Popen con lista) o a través de la shell elegida, para heredar
+        el PATH/entorno de tu terminal (venv, conda, pyenv…)."""
+        sh = (getattr(cfg, "shell", "none") or "none").lower()
+        line = f"{cfg.executable} {cfg.args}".strip()
+        path = env.get("PATH") or os.environ.get("PATH")
+        if sh == "none":
+            return self._resolve(cfg, env)
+        if sh == "cmd":
+            if not IS_WIN:
+                raise OSError("La shell 'cmd' solo existe en Windows")
+            return f'{os.environ.get("COMSPEC", "cmd.exe")} /d /s /c "{line}"'
+        if sh == "powershell":
+            exe = shutil.which("powershell", path=path) or shutil.which("pwsh", path=path)
+            if not exe:
+                raise FileNotFoundError("PowerShell no encontrado")
+            return [exe, "-NoLogo", "-Command", line]
+        if sh == "bash":
+            exe = shutil.which("bash", path=path)
+            if not exe and IS_WIN:
+                for c in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"):
+                    if os.path.isfile(c):
+                        exe = c
+                        break
+            if not exe:
+                raise FileNotFoundError("bash no encontrado (¿Git Bash / WSL en el PATH?)")
+            return [exe, "-lc", line]
+        raise ValueError(f"Shell desconocida: {sh}")
+
     def _open_logs(self, m: _Managed):
         out = []
         for suffix in ("out", "err"):
@@ -284,7 +313,8 @@ class ProcessEngine:
                 env.update(parse_env(m.cfg.env))
                 env[ENV_MARK] = m.cfg.id
                 env.setdefault("PYTHONUNBUFFERED", "1")
-                cmd = self._resolve(m.cfg, env)
+                cmd = self._build_cmd(m.cfg, env)
+                self._log(m, "launch → " + (cmd if isinstance(cmd, str) else " ".join(cmd))[:240], "info")
                 console = m.cfg.mode == "console"
                 kwargs: dict = dict(cwd=m.cfg.cwd, env=env, stdin=subprocess.DEVNULL)
                 if console:

@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+import threading
+
 import flet as ft
 
 import theme as T
+import interpreters
 from interfaces import EngineAPI, RegistryAPI, ServiceConfig
 from serviceregistry import RegistryError, ServiceLockedError, slugify
 
@@ -25,8 +28,15 @@ class Configurator:
                             hint_text="e.g. PromptForge", **T.field_style())
         alias = ft.TextField(label="UI Alias / Binding ID", value=cfg.alias if cfg else "",
                              hint_text="promptforge", expand=True, **T.field_style())
-        exe = ft.TextField(label="Executable", value=cfg.executable if cfg else "python",
+        exe = ft.TextField(label="Executable (ruta completa recomendada)", value=cfg.executable if cfg else "python",
                            expand=True, **T.field_style())
+        shell = ft.Dropdown(label="Launch via", value=(cfg.shell if cfg else "none"), expand=True,
+                            options=[ft.DropdownOption("none", "Direct (Popen)"),
+                                     ft.DropdownOption("cmd", "cmd.exe (terminal)"),
+                                     ft.DropdownOption("powershell", "PowerShell (terminal)"),
+                                     ft.DropdownOption("bash", "Bash / Git Bash (login)")],
+                            **T.field_style(dense=False))
+        interp_box = ft.Column(spacing=4, visible=False)
         mode = ft.Dropdown(label="Startup mode", value=cfg.mode if cfg else "background", expand=True,
                            options=[ft.DropdownOption("background", "Background process"),
                                     ft.DropdownOption("console", "Visible console")],
@@ -75,7 +85,7 @@ class Configurator:
 
         def form():
             return dict(name=name.value, alias=alias.value, executable=exe.value, args=args.value,
-                        cwd=cwd.value, env=env.value, mode=mode.value,
+                        cwd=cwd.value, env=env.value, mode=mode.value, shell=shell.value or "none",
                         autorestart=autorestart.value == "true", visible=visible.value == "true")
 
         def show_err(lines):
@@ -99,6 +109,61 @@ class Configurator:
             self.page.pop_dialog()
             self.on_change(saved.id)
 
+        def pick(path):
+            exe.value = path
+            interp_box.visible = False
+            self.page.update()
+
+        def render(items, header=None):
+            rows = [T.label(header, 10, T.MUTED)] if header else []
+            for it in items:
+                good = it.ok and not it.missing
+                tag = "✓ imports OK" if good else (f"✗ falta: {', '.join(it.missing)}" if it.ok else f"✗ {it.error}")
+                col = T.GREEN if good else (T.AMBER if it.ok else T.RED)
+                rows.append(ft.Container(ft.Row([
+                    ft.Text(tag, size=10, color=col, width=150, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(f"Py {it.version or '?'} · {it.source}", size=10, color=T.MUTED, width=170, max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(it.path, size=10, color=T.TEXT, font_family=T.MONO, expand=True, max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS, tooltip=it.path)], spacing=8),
+                    on_click=(lambda _, p=it.path: pick(p)) if it.ok else None, ink=True, border_radius=5,
+                    padding=ft.Padding.symmetric(vertical=4, horizontal=6), bgcolor=T.INPUT_BG,
+                    tooltip="Click para usar este intérprete"))
+            interp_box.controls = rows or [T.label("No se encontraron intérpretes.", 11, T.AMBER)]
+            interp_box.visible = True
+            self.page.update()
+
+        def detect(_):
+            interp_box.controls = [T.label("Buscando intérpretes…", 11, T.CYAN)]
+            interp_box.visible = True
+            self.page.update()
+            wd, ar = cwd.value.strip(), args.value
+
+            def work():
+                try:
+                    items = interpreters.discover(wd, ar)
+                except Exception as e:           # nunca romper la UI por una detección
+                    interp_box.controls = [T.label(f"Error de detección: {e}", 11, T.RED)]
+                    self.page.update()
+                    return
+                mods = interpreters.script_imports(wd, ar)
+                render(items, "Imports del script: " + (", ".join(mods) or "—") + "   (click en una fila para usarla)")
+            threading.Thread(target=work, daemon=True).start()
+
+        def test(_):
+            wd = cwd.value.strip()
+            path = interpreters.resolve_exe(exe.value, wd)
+            if not path:
+                interp_box.controls = [T.label(f"No se encuentra '{exe.value}' en el PATH de ServiceDeck.", 11, T.RED)]
+                interp_box.visible = True
+                return self.page.update()
+            interp_box.controls = [T.label("Probando…", 11, T.CYAN)]
+            interp_box.visible = True
+            self.page.update()
+            mods = interpreters.script_imports(wd, args.value)
+            threading.Thread(target=lambda: render([interpreters.probe(path, mods, wd, "este Executable")],
+                                                   "ServiceDeck ejecutaría:"), daemon=True).start()
+
         def sec(t):
             return ft.Container(T.label(t, 10, T.CYAN, ft.FontWeight.W_700, spacing=1.4),
                                 padding=ft.Padding.only(bottom=7),
@@ -107,7 +172,7 @@ class Configurator:
         banner = ft.Container(
             T.label("Servicio en ejecución: detenelo para editar su configuración.", 11, T.AMBER),
             padding=10, bgcolor="#2a2312", border_radius=6, visible=locked)
-        for c in (name, alias, exe, mode, args, cwd, env, autorestart, visible):
+        for c in (name, alias, exe, mode, shell, args, cwd, env, autorestart, visible):
             c.disabled = locked
 
         body = ft.Column([
@@ -115,7 +180,10 @@ class Configurator:
             sec("01 / IDENTITY"), name,
             ft.Row([alias, T.button("Generate", generate, disabled=locked)], vertical_alignment=ft.CrossAxisAlignment.START),
             T.label("Identificador único. Vincula la configuración con su toggle del dashboard.", 10),
-            sec("02 / EXECUTION"), ft.Row([exe, mode]), args, cwd, env,
+            sec("02 / EXECUTION"),
+            ft.Row([exe, T.button("Detect", detect, disabled=locked), T.button("Test", test, disabled=locked)],
+                   vertical_alignment=ft.CrossAxisAlignment.START),
+            interp_box, ft.Row([mode, shell]), args, cwd, env,
             sec("03 / BEHAVIOR"), ft.Row([autorestart, visible]),
             ft.Container(ft.Column([
                 ft.Text("Binding preview", size=11, weight=ft.FontWeight.W_700, color="#a8c9d4"),

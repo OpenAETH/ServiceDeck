@@ -14,6 +14,7 @@ from interfaces import ServiceConfig, parse_env
 
 ALIAS_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 SCHEMA = 1
+SHELLS = ("none", "cmd", "powershell", "bash")
 
 
 class RegistryError(ValueError):
@@ -144,6 +145,8 @@ class ServiceRegistry:
             p.append(f"El directorio de trabajo no existe: {cwd}")
         if data.get("mode", "background") not in ("background", "console"):
             p.append("Modo de ejecución inválido.")
+        if data.get("shell", "none") not in SHELLS:
+            p.append("Shell de lanzamiento inválido.")
         try:
             parse_env(data.get("env", ""))
         except ValueError as e:
@@ -161,6 +164,7 @@ class ServiceRegistry:
             "cwd": (data.get("cwd") or "").strip(),
             "env": (data.get("env") or "").strip(),
             "mode": data.get("mode", "background"),
+            "shell": data.get("shell", "none"),
             "autorestart": bool(data.get("autorestart", False)),
             "visible": bool(data.get("visible", True)),
         }

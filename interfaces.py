@@ -32,6 +32,7 @@ class ServiceConfig:
     cwd: str = ""
     env: str = ""                # KEY=VALUE por línea
     mode: str = "background"     # background | console
+    shell: str = "none"          # none | cmd | powershell | bash  (lanzar a través de la terminal)
     autorestart: bool = False
     visible: bool = True
 

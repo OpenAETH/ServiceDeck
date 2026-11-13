@@ -29,6 +29,12 @@ Datos en `%LOCALAPPDATA%\AETHERYON\ServiceDeck` (override: variable `SERVICEDECK
 - Config bloqueada (editar/eliminar) mientras el servicio está activo, en UI **y** en el registro.
 - Modo "Visible console": ventana propia; su salida no se captura en logs (se avisa en la consola).
 
+## Intérprete / terminal
+El `python` que ve ServiceDeck puede diferir del de tu terminal (venv, conda, otra instalación). En el modal:
+- **Detect**: lista los Python encontrados (PATH, venv del proyecto, py launcher, conda…), con versión y qué imports del script les faltan; click en una fila para usarla.
+- **Test**: prueba el Executable actual. **Launch via**: lanza a través de cmd / PowerShell / Bash para heredar el entorno de la terminal.
+- La consola muestra `launch → <ruta>` en cada inicio: ahí se ve qué intérprete se usó.
+
 ## Pruebas
     python tests/test_engine.py -v         # 10 pruebas con procesos reales
     python tests/ui_logic_smoke.py          # modal → guardar → toggle → PID → stop (página simulada)
