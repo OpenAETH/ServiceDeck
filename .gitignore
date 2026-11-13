@@ -11,3 +11,6 @@ config.gitdevcore
 credentials.json
 secrets.json
 # <<< GitDevCore <<<
+
+# Repo Report
+repo_report--*.txt
