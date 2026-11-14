@@ -25,7 +25,8 @@ LOG_MAX_BYTES = 5 * 1024 * 1024
 RESTART_WINDOW = 60.0
 RESTART_MAX = 5
 TAIL_INTERVAL = 0.15
-URL_RE = re.compile(r"https?://[^\s'\"<>\]]+")
+# host válido (nombre, IPv4 o [IPv6]) + puerto opcional + ruta/consulta opcional: ignora "http://{" de código fuente
+URL_RE = re.compile(r"https?://(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::\d{1,5})?(?:[/?#][^\s'\"<>]*)?")
 LOOPBACK = ("127.0.0.1", "localhost", "0.0.0.0", "::", "::1", "[::]", "[::1]")
 
 
@@ -326,6 +327,9 @@ class ProcessEngine:
                 env.update(parse_env(m.cfg.env))
                 env[ENV_MARK] = m.cfg.id
                 env.setdefault("PYTHONUNBUFFERED", "1")
+                # stdout/stderr van a archivos: sin esto Python usa cp1252 en Windows y revienta con '→', emojis, etc.
+                env.setdefault("PYTHONUTF8", "1")
+                env.setdefault("PYTHONIOENCODING", "utf-8")
                 cmd = self._build_cmd(m.cfg, env)
                 self._log(m, "launch → " + (cmd if isinstance(cmd, str) else " ".join(cmd))[:240], "info")
                 console = m.cfg.mode == "console"

@@ -122,6 +122,25 @@ class T(unittest.TestCase):
         self.eng.stop(c.id)
         self.assertIsNone(self.eng.status(c.id).url)
 
+    def test_url_detection_ignores_source_code_and_accepts_real_urls(self):
+        from process_engine import URL_RE
+        bad = "    print(f\"DevDeck web \\u2192 http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}{q}\", flush=True)"
+        self.assertEqual(URL_RE.findall(bad), [])
+        self.assertEqual(URL_RE.findall("DevDeck web → http://127.0.0.1:8551?x=1"), ["http://127.0.0.1:8551?x=1"])
+        self.assertEqual(URL_RE.findall("Running on http://[::1]:8000/ (Press CTRL+C)"), ["http://[::1]:8000/"])
+        self.assertEqual(URL_RE.findall("Uvicorn running on http://0.0.0.0:8008"), ["http://0.0.0.0:8008"])
+
+    def test_child_gets_utf8_env_and_user_can_override(self):
+        c = self.cfg(args='-c "import os,time;print(os.environ.get(\'PYTHONUTF8\'),os.environ.get(\'PYTHONIOENCODING\'),flush=True);time.sleep(30)"')
+        self.eng.start(c); self.assertTrue(wait(lambda: "1 utf-8" in self.eng.read_log(c.id)))
+        self.eng.stop(c.id)
+        c2 = self.cfg(id="svc_t2", alias="t2", env="PYTHONIOENCODING=latin-1", args=c.args)
+        self.eng.start(c2); self.assertTrue(wait(lambda: "1 latin-1" in self.eng.read_log(c2.id)))
+
+    def test_unicode_output_roundtrip(self):
+        c = self.cfg(args='-c "print(\'flecha \\u2192 ok\',flush=True);import time;time.sleep(30)"')
+        self.eng.start(c); self.assertTrue(wait(lambda: any(e.kind == "output" and "flecha → ok" in e.message for e in self.events)))
+
     def test_output_not_duplicated_across_restart(self):
         c = self.cfg(args='-c "import time;print(\'run-line\',flush=True);time.sleep(30)"')
         self.eng.start(c); self.assertTrue(wait(lambda: any(e.kind == "output" for e in self.events)))
