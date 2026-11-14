@@ -35,6 +35,11 @@ El `python` que ve ServiceDeck puede diferir del de tu terminal (venv, conda, ot
 - **Test**: prueba el Executable actual. **Launch via**: lanza a través de cmd / PowerShell / Bash para heredar el entorno de la terminal.
 - La consola muestra `launch → <ruta>` en cada inicio: ahí se ve qué intérprete se usó.
 
+## v1.3 — logs en vivo, Open URL, autostart
+- **Logs en vivo (sin botón):** el motor sigue stdout/stderr de cada servicio y emite cada línea como evento; al seleccionar un servicio la consola pasa a su pestaña LOG, carga lo último y sigue en tiempo real. stderr en ámbar (rojo si es error/traceback), filtro de texto y **Follow** para fijar/soltar el auto-scroll.
+- **Open ↗:** se detecta la primera URL http(s) que imprime el servicio (0.0.0.0 → 127.0.0.1, prioriza loopback); botón en la fila y en el Inspector.
+- **Auto Start:** por servicio ("Al abrir ServiceDeck"); se inician escalonados, omitiendo los ya activos.
+
 ## Pruebas
     python tests/test_engine.py -v         # 10 pruebas con procesos reales
     python tests/ui_logic_smoke.py          # modal → guardar → toggle → PID → stop (página simulada)

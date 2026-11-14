@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -23,6 +24,9 @@ STOP_GRACE = 5.0             # s entre terminate y kill
 LOG_MAX_BYTES = 5 * 1024 * 1024
 RESTART_WINDOW = 60.0
 RESTART_MAX = 5
+TAIL_INTERVAL = 0.15
+URL_RE = re.compile(r"https?://[^\s'\"<>\]]+")
+LOOPBACK = ("127.0.0.1", "localhost", "0.0.0.0", "::", "::1", "[::]", "[::1]")
 
 
 # ------------------------------------------------------------ Windows Job
@@ -118,10 +122,14 @@ class _Managed:
         self.stop_requested = False
         self.exited = threading.Event()
         self.restarts: List[float] = []
+        self.url: Optional[str] = None
+        self.run = 0                         # generación de ejecución (para el tailer)
+        self.offsets = [0, 0]                # dónde empieza la salida de esta ejecución
+        self.ends: Dict[int, List[int]] = {} # run -> tamaño final de logs (acota al tailer)
 
     def snapshot(self) -> ServiceStatus:
         return ServiceStatus(self.cfg.id, self.state, self.pid, self.started_at,
-                             self.exit_code, self.message)
+                             self.exit_code, self.message, self.url)
 
 
 class ProcessEngine:
@@ -236,6 +244,9 @@ class ProcessEngine:
             m.ps, m.pid, m.create_time = p, p.pid, p.create_time()
             m.started_at = m.create_time
             m.exited.clear()
+            m.run += 1
+            sizes = [os.path.getsize(os.path.join(self.log_dir, f"{sid}.{x}.log")) if os.path.exists(os.path.join(self.log_dir, f"{sid}.{x}.log")) else 0 for x in ("out", "err")]
+            threading.Thread(target=self._tailer, args=(m, m.run, sizes), daemon=True).start()
             self._set(m, ServiceState.RUNNING, f"Adoptado proceso existente (PID {p.pid})", "warn")
             threading.Thread(target=self._monitor, args=(m,), daemon=True).start()
         self._save_runtime()
@@ -293,6 +304,7 @@ class ProcessEngine:
             f = open(path, "ab", buffering=0)
             f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} start {m.cfg.alias} ===\n".encode())
             out.append(f)
+        m.offsets = [os.path.getsize(os.path.join(self.log_dir, f"{m.cfg.id}.{x}.log")) for x in ("out", "err")]
         return out
 
     def start(self, cfg: ServiceConfig) -> ServiceStatus:
@@ -305,7 +317,8 @@ class ProcessEngine:
             m.stop_requested = False
             m.exited.clear()
             m.exit_code = None
-            self._set(m, ServiceState.STARTING, "Iniciando…", pid=None, started_at=None, ps=None)
+            m.run += 1
+            self._set(m, ServiceState.STARTING, "Iniciando…", pid=None, started_at=None, ps=None, url=None)
             try:
                 if not os.path.isdir(m.cfg.cwd):
                     raise FileNotFoundError(f"Directorio de trabajo inexistente: {m.cfg.cwd}")
@@ -348,6 +361,8 @@ class ProcessEngine:
 
             self._save_runtime()
             threading.Thread(target=self._monitor, args=(m,), daemon=True).start()
+            if m.files:
+                threading.Thread(target=self._tailer, args=(m, m.run, list(m.offsets)), daemon=True).start()
             # confirmar inicio: debe sobrevivir el período de gracia
             if not m.exited.wait(STARTUP_GRACE):
                 with m.lock:
@@ -358,7 +373,7 @@ class ProcessEngine:
 
     # ------------------------------------------------------------- monitor
     def _monitor(self, m: _Managed):
-        proc, ps = m.proc, m.ps
+        proc, ps, run = m.proc, m.ps, m.run
         try:
             if proc is not None:
                 code = proc.wait()
@@ -370,6 +385,9 @@ class ProcessEngine:
             code = None
         self._reap_leftovers(m)
         self._close_files(m)
+        m.ends[run] = [self._size(m.cfg.id, x) for x in ("out", "err")]
+        for old in [k for k in m.ends if k < run - 4]:
+            m.ends.pop(old, None)
         if m.job:
             m.job.close()
             m.job = None
@@ -377,6 +395,7 @@ class ProcessEngine:
             requested = m.stop_requested
             m.exit_code = code
             m.proc = m.ps = None
+            m.url = None
             old_pid = m.pid
         if requested:
             self._set(m, ServiceState.STOPPED, "Detenido", "warn", pid=None)
@@ -420,6 +439,86 @@ class ProcessEngine:
                 os.killpg(m.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+
+    # ------------------------------------------------------------- salida en vivo
+    def _size(self, service_id: str, stream: str) -> int:
+        try:
+            return os.path.getsize(os.path.join(self.log_dir, f"{service_id}.{stream}.log"))
+        except OSError:
+            return 0
+
+    def _tailer(self, m: _Managed, run: int, offsets: List[int]) -> None:
+        """Sigue stdout/stderr del servicio y emite cada línea como evento 'output'.
+        Termina tras drenar lo último cuando el proceso sale o empieza otra ejecución."""
+        sid = m.cfg.id
+        paths = [os.path.join(self.log_dir, f"{sid}.{x}.log") for x in ("out", "err")]
+        pending = [b"", b""]
+        offs = list(offsets)
+        while True:
+            done = m.run != run or m.exited.is_set()
+            lim = m.ends.get(run)                     # fin de ESTA ejecución (si ya terminó)
+            for i, stream in enumerate(("out", "err")):
+                if lim is not None and offs[i] >= lim[i]:
+                    continue
+                try:
+                    with open(paths[i], "rb") as f:
+                        f.seek(offs[i])
+                        chunk = f.read() if lim is None else f.read(lim[i] - offs[i])
+                except OSError:
+                    continue
+                if not chunk:
+                    continue
+                offs[i] += len(chunk)
+                data = pending[i] + chunk
+                *lines, pending[i] = data.split(b"\n")
+                for raw in lines:
+                    self._output(m, run, stream, raw.decode("utf-8", "replace").rstrip("\r"))
+            if done:
+                for i, stream in enumerate(("out", "err")):     # resto sin salto de línea final
+                    if pending[i]:
+                        self._output(m, run, stream, pending[i].decode("utf-8", "replace").rstrip("\r"))
+                return
+            time.sleep(TAIL_INTERVAL)
+
+    def _output(self, m: _Managed, run: int, stream: str, line: str) -> None:
+        self._emit(EngineEvent("output", m.cfg.id, line, "error" if stream == "err" else "info", stream=stream))
+        if m.run == run:
+            self._detect_url(m, line)
+
+    def _detect_url(self, m: _Managed, line: str) -> None:
+        for raw in URL_RE.findall(line):
+            url = raw.rstrip(".,;:)'\"")
+            host = re.match(r"https?://(\[[^\]]+\]|[^:/]+)", url)
+            if not host:
+                continue
+            h = host.group(1)
+            loop = h in LOOPBACK
+            if h in ("0.0.0.0", "[::]", "::"):
+                url = url.replace(h, "127.0.0.1", 1)
+            score = 2 if loop else 1
+            cur = m.url
+            cur_score = 0 if not cur else (2 if re.match(r"https?://(127\.0\.0\.1|localhost|\[::1\])", cur) else 1)
+            if score > cur_score:
+                with m.lock:
+                    m.url = url
+                    snap = m.snapshot()
+                self._emit(EngineEvent("state", m.cfg.id, f"URL detectada: {url}", "ok", snap))
+                return
+
+    def read_log_lines(self, service_id: str, tail: int = 500):
+        """[(stream, línea)] de las últimas líneas de cada archivo (stdout primero)."""
+        res = []
+        for stream in ("out", "err"):
+            path = os.path.join(self.log_dir, f"{service_id}.{stream}.log")
+            try:
+                with open(path, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - 128 * 1024))
+                    text = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            res += [(stream, l.rstrip("\r")) for l in text.splitlines()[-tail:]]
+        return res
 
     def _err_tail(self, service_id: str, n: int = 6) -> List[str]:
         """Últimas líneas no vacías de stderr de la ejecución actual (diagnóstico)."""

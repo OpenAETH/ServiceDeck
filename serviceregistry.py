@@ -167,6 +167,7 @@ class ServiceRegistry:
             "shell": data.get("shell", "none"),
             "autorestart": bool(data.get("autorestart", False)),
             "visible": bool(data.get("visible", True)),
+            "autostart": bool(data.get("autostart", False)),
         }
 
     def create(self, data: dict) -> ServiceConfig:

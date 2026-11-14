@@ -2,6 +2,8 @@
 import atexit
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -31,6 +33,14 @@ def build_core():
     return registry, engine
 
 
+def autostart(registry, engine):
+    """Inicia (escalonado) los servicios marcados 'Auto Start' que no estén ya activos."""
+    for cfg in registry.list():
+        if cfg.autostart and not engine.is_active(cfg.id):
+            engine.start(cfg)
+            time.sleep(0.3)
+
+
 def main(page: ft.Page):
     registry, engine = build_core()
     page.title = "AETHERYON ServiceDeck"
@@ -44,6 +54,7 @@ def main(page: ft.Page):
     page.window.prevent_close = True
     page.window.on_event = dash.on_window_event
     page.add(dash.build())
+    threading.Thread(target=autostart, args=(registry, engine), daemon=True).start()
 
 
 if __name__ == "__main__":

@@ -106,6 +106,28 @@ class T(unittest.TestCase):
         self.eng.start(c)
         self.assertTrue(wait(lambda: sum(1 for e in self.events if e.kind=="state" and e.status.state==S.STARTING) >= 2, 12))
 
+    def test_output_events_and_url(self):
+        c = self.cfg(args='-c "import sys,time;print(\'hola uno\',flush=True);time.sleep(0.4);sys.stderr.write(\'warn dos\\n\');sys.stderr.flush();'
+                          'print(\'Running on http://0.0.0.0:8050/\',flush=True);time.sleep(0.3);print(\'Running on http://192.168.1.5:8050\',flush=True);time.sleep(30)"')
+        self.eng.start(c)
+        self.assertTrue(wait(lambda: self.eng.status(c.id).url is not None))
+        self.assertEqual(self.eng.status(c.id).url, "http://127.0.0.1:8050/")      # 0.0.0.0 -> loopback, y no lo pisa la IP LAN
+        time.sleep(0.6)
+        self.assertEqual(self.eng.status(c.id).url, "http://127.0.0.1:8050/")
+        out = [(e.stream, e.message) for e in self.events if e.kind == "output"]
+        self.assertIn(("out", "hola uno"), out); self.assertIn(("err", "warn dos"), out)
+        self.assertLess(out.index(("out", "hola uno")), out.index(("err", "warn dos")))
+        self.assertTrue(any(e.kind == "state" and e.status and e.status.url for e in self.events))
+        self.assertIn(("out", "hola uno"), self.eng.read_log_lines(c.id))
+        self.eng.stop(c.id)
+        self.assertIsNone(self.eng.status(c.id).url)
+
+    def test_output_not_duplicated_across_restart(self):
+        c = self.cfg(args='-c "import time;print(\'run-line\',flush=True);time.sleep(30)"')
+        self.eng.start(c); self.assertTrue(wait(lambda: any(e.kind == "output" for e in self.events)))
+        self.eng.restart(c); time.sleep(0.8)
+        self.assertEqual(sum(1 for e in self.events if e.kind == "output" and e.message == "run-line"), 2)
+
 class Sh(unittest.TestCase):
     def test_interpreters(self):
         import interpreters
@@ -143,6 +165,7 @@ class R(unittest.TestCase):
         with self.assertRaises(RegistryError): r.create({**data, "name": "z", "alias": "z", "shell": "zsh"})
         u = r.update(c.id, {**data, "name": "Renombrado", "id": "hack"})   # id inmutable
         self.assertEqual(u.id, c.id); self.assertEqual(u.alias, "prompt_forge")
+        self.assertFalse(c.autostart); self.assertTrue(r.update(c.id, {**data, "name": "Renombrado", "autostart": True}).autostart)
         r2 = ServiceRegistry(os.path.join(d, "services.json")); self.assertEqual(r2.list()[0].name, "Renombrado")
         r.set_lock_guard(lambda i: True)
         with self.assertRaises(ServiceLockedError): r.update(c.id, data)

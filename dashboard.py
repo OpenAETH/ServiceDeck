@@ -5,8 +5,10 @@ Solo habla con EngineAPI/RegistryAPI/Configurator; nunca lanza comandos.
 from __future__ import annotations
 
 import asyncio
+import collections
 import threading
 import time
+import webbrowser
 from typing import Optional
 
 import flet as ft
@@ -30,14 +32,23 @@ class Dashboard:
         self.selected: Optional[str] = None
         self.tab = "events"                       # events | log
         self._lock = threading.RLock()
-        self._log_cache = ""
         self.configurator = Configurator(page, registry, engine, self._configured)
 
         self.list_view = ft.ListView(spacing=6, expand=True, padding=ft.Padding.all(10))
         self.inspector = ft.Container(padding=ft.Padding.symmetric(vertical=8, horizontal=12))
         self.events = ft.ListView(spacing=0, auto_scroll=True, expand=True, padding=ft.Padding.all(8))
-        self.logtext = ft.Text("", size=11, font_family=T.MONO, color=T.TEXT, selectable=True)
-        self.logview = ft.Column([self.logtext], scroll=ft.ScrollMode.AUTO, auto_scroll=True, expand=True, visible=False)
+        self.logview = ft.ListView(spacing=0, auto_scroll=True, expand=True, padding=ft.Padding.all(8), visible=False)
+        self._buf = collections.deque(maxlen=3000)        # (stream, línea) del servicio seleccionado
+        self._pending: list = []                          # líneas nuevas aún sin dibujar
+        self._plock = threading.Lock()
+        self._filter = ""
+        self._follow = True
+        self._ui_err_reported = False
+        self._prev_state: dict = {}
+        self.filter_tf = ft.TextField(hint_text="filtrar…", width=130, visible=False, on_change=self._on_filter,
+                                      **T.field_style(text_size=11, content_padding=ft.Padding.symmetric(vertical=4, horizontal=8)))
+        self.follow_btn = T.button("⇣ Follow", self._toggle_follow, "primary", small=True)
+        self.follow_btn.visible = False
         self.tab_events = ft.Container()
         self.tab_log = ft.Container()
         self.stat = {k: ft.Text("0", size=15, weight=ft.FontWeight.W_700) for k in ("total", "running", "stopped", "errors")}
@@ -73,7 +84,8 @@ class Dashboard:
         self.inspector_panel = T.panel(self.inspector, self._head("Service Inspector", "SELECTED INSTANCE"))
         self.console_panel = T.panel(
             ft.Container(ft.Stack([self.events, self.logview], expand=True), bgcolor=T.LOG_BG, expand=True),
-            ft.Row([self._tabs(), T.button("Clear", self._clear_console, small=True)],
+            ft.Row([self._tabs(), ft.Row([self.filter_tf, self.follow_btn, T.button("Clear", self._clear_console, small=True)],
+                                         spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             fill=True)
         self.console_panel.expand = True
@@ -89,7 +101,7 @@ class Dashboard:
         self.refresh()
         self.log("ServiceDeck initialized.", "info")
         self.log("Registry loaded.", "ok")
-        threading.Thread(target=self._tail_loop, daemon=True).start()
+        threading.Thread(target=self._flush_loop, daemon=True).start()
         return ft.Column([topbar, self.body, footer], spacing=0, expand=True)
 
     def _head(self, title, sub):
@@ -167,7 +179,8 @@ class Dashboard:
         cmd = ft.Text(f"{cfg.executable} {cfg.args}".strip(), size=10.5, color=T.MUTED, font_family=T.MONO,
                       max_lines=1, overflow=ELL)
         main = ft.Column([head, cmd], spacing=3, expand=True)
-        actions = ft.Row([sw, T.icon_button("↻", "Restart", lambda _, i=cfg.id: self._restart(i), disabled=busy),
+        open_btn = [T.icon_button("↗", f"Abrir {st.url}", lambda _, u=st.url: self._open(u))] if st.url and st.state == ServiceState.RUNNING else []
+        actions = ft.Row([*open_btn, sw, T.icon_button("↻", "Restart", lambda _, i=cfg.id: self._restart(i), disabled=busy),
                           T.icon_button("⚙", "Configure", lambda _, i=cfg.id: self.configurator.open(i))],
                          spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER)
         return ft.Container(ft.Row([main, actions], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
@@ -200,17 +213,19 @@ class Dashboard:
                     kv("Uptime", uptime), kv("Exit", "—" if st.exit_code is None else st.exit_code),
                     kv("Restart", "ON" if cfg.autorestart else "OFF", w=70)], spacing=6, wrap=True, run_spacing=4),
             wide("Exec", f"{cfg.executable} {cfg.args}".strip()), wide("Dir", cfg.cwd),
+            *([wide("URL", st.url, T.CYAN)] if st.url else []),
             *([wide("Msg", st.message, T.RED if st.state == ServiceState.ERROR else T.MUTED)] if st.message else []),
             ft.Row([T.button("Edit", lambda _: self.configurator.open(cfg.id), small=True, disabled=active),
                     T.button("Logs", lambda _: self._set_tab("log"), small=True),
+                    *([T.button("Open ↗", lambda _: self._open(st.url), "primary", small=True)] if st.url else []),
                     T.button("Delete", lambda _: self.configurator.confirm_delete(cfg.id), "danger", small=True,
                              disabled=active)], spacing=6)], spacing=5, tight=True)
 
     def _select(self, sid: str) -> None:
         self.selected = sid
-        self._log_cache = ""
+        self._load_buffer(sid)
+        self._set_tab("log", update=False)
         self.refresh()
-        self._pull_log()
 
     # ---------------------------------------------------------------- consola / tabs
     def _render_tabs(self):
@@ -226,34 +241,86 @@ class Dashboard:
         self.tab = name
         self.events.visible = name == "events"
         self.logview.visible = name == "log"
+        self.filter_tf.visible = self.follow_btn.visible = name == "log"
         self._render_tabs()
         if name == "log":
-            self._pull_log(force=True)
+            self._rerender()
         if update:
             try:
                 self.page.update()
             except Exception:
                 pass
 
-    def _pull_log(self, force: bool = False) -> None:
-        if self.tab != "log":
-            return
-        text = self.engine.read_log(self.selected, tail=400) if self.selected else "(seleccioná un servicio)"
-        if force or text != self._log_cache:
-            self._log_cache = text
-            self.logtext.value = text
-            try:
-                self.logtext.update()
-            except Exception:
-                pass
+    # ---- salida en vivo del servicio seleccionado (event-driven, sin botón de refresco)
+    def _line_ctl(self, stream: str, line: str) -> ft.Control:
+        color = T.AMBER if stream == "err" else T.TEXT
+        low = line.lower()
+        if stream == "err" and any(w in low for w in ("error", "traceback", "exception", "critical")):
+            color = T.RED
+        return ft.Text(line, size=11, color=color, font_family=T.MONO, selectable=True)
 
-    def _tail_loop(self) -> None:                     # refresco en vivo del log y uptime
+    def _match(self, line: str) -> bool:
+        return not self._filter or self._filter in line.lower()
+
+    def _load_buffer(self, sid: str) -> None:
+        with self._plock:
+            self._buf.clear()
+            self._pending.clear()
+            self._buf.extend(self.engine.read_log_lines(sid, 500))
+
+    def _rerender(self) -> None:
+        with self._plock:
+            items = [(s, l) for s, l in self._buf if self._match(l)][-1500:]
+            self._pending.clear()
+        if not self.selected:
+            self.logview.controls = [T.label("Seleccioná un servicio para ver su salida en vivo.", 12)]
+        else:
+            self.logview.controls = [self._line_ctl(s, l) for s, l in items] or \
+                [T.label("(sin salida todavía)", 11)]
+        self.logview.auto_scroll = self._follow
+        try:
+            self.logview.update()
+        except Exception:
+            pass
+
+    def _on_filter(self, e) -> None:
+        self._filter = (e.control.value or "").strip().lower()
+        self._rerender()
+
+    def _toggle_follow(self, _=None) -> None:
+        self._follow = not self._follow
+        self.follow_btn.bgcolor = T.CYAN if self._follow else T.PANEL2
+        self.follow_btn.content.color = "#06141c" if self._follow else T.TEXT
+        self.logview.auto_scroll = self._follow
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _flush_loop(self) -> None:
+        """Dibuja en lotes (5/s) las líneas que llegan del motor."""
         while True:
-            time.sleep(1.5)
+            time.sleep(0.2)
             try:
-                self._pull_log()
-            except Exception:
-                pass
+                with self._plock:
+                    new, self._pending = self._pending, []
+                if not new or self.tab != "log":
+                    continue
+                if self.logview.controls and isinstance(self.logview.controls[0], ft.Text) and \
+                        self.logview.controls[0].value.startswith(("(sin salida", "Seleccioná")):
+                    self.logview.controls.clear()
+                self.logview.controls.extend(self._line_ctl(s, l) for s, l in new if self._match(l))
+                del self.logview.controls[:-1500]
+                self.logview.update()
+            except Exception as e:                       # no tragarse el error en silencio
+                if not self._ui_err_reported:
+                    self._ui_err_reported = True
+                    self.log(f"UI: error actualizando el log en vivo: {e}", "error")
+
+    def _open(self, url) -> None:
+        if url and url.startswith(("http://", "https://")):
+            self.log(f"Abriendo {url}", "info")
+            threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
     def log(self, message: str, level: str = "info") -> None:
         color = {"ok": T.GREEN, "info": T.CYAN, "warn": T.AMBER, "error": T.RED}.get(level, T.MUTED)
@@ -269,6 +336,11 @@ class Dashboard:
         if self.tab == "events":
             self.events.controls.clear()
             self.events.update()
+        else:
+            with self._plock:
+                self._buf.clear()
+                self._pending.clear()
+            self._rerender()
 
     # ---------------------------------------------------------------- acciones
     def _toggle(self, sid: str, control: ft.Switch) -> None:
@@ -313,11 +385,23 @@ class Dashboard:
 
     # ---------------------------------------------------------------- engine → UI
     def _on_event(self, ev: EngineEvent) -> None:
+        if ev.kind == "output":
+            if ev.service_id == self.selected:
+                with self._plock:
+                    self._buf.append((ev.stream, ev.message))
+                    self._pending.append((ev.stream, ev.message))
+            return
         self.log(ev.message if ev.kind == "log" else f"{self._alias(ev.service_id)}: {ev.message}", ev.level)
         if ev.kind == "state":
+            prev = self._prev_state.get(ev.service_id)
+            now = ev.status.state if ev.status else None
+            self._prev_state[ev.service_id] = now
+            if ev.service_id == self.selected and now == ServiceState.STARTING and prev != ServiceState.STARTING:
+                with self._plock:                         # nueva ejecución (transición a STARTING): vista limpia
+                    self._buf.clear()
+                    self._pending.clear()
+                self._rerender()
             self.refresh()
-            if ev.service_id == self.selected:
-                self._pull_log(force=True)
 
     def _alias(self, sid) -> str:
         cfg = self.registry.get(sid) if sid else None

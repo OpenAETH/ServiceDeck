@@ -44,3 +44,17 @@ sw.on_change(MagicMock(control=sw)); time.sleep(1.5)
 print("after stop:", eng.status(cfg.id).state.value, "pid alive:", psutil.pid_exists(st.pid), "kids alive:", any(k.is_running() and k.status()!='zombie' for k in kids))
 dash._select(cfg.id); print("inspector ok")
 eng.shutdown()
+
+# --- v1.3: la primera línea de salida no se pierde (URL detectada durante STARTING no limpia la vista)
+import dashboard as _dm
+from interfaces import EngineEvent, ServiceStatus, ServiceState
+d2 = _dm.Dashboard(page, reg, eng); d2.build(); d2.selected = cfg.id
+ST = lambda st, m="": EngineEvent("state", cfg.id, m, "info", ServiceStatus(cfg.id, st))
+d2._on_event(ST(ServiceState.STARTING, "Iniciando…"))
+d2._on_event(EngineEvent("output", cfg.id, "primera linea", "info", stream="out"))
+d2._on_event(ST(ServiceState.STARTING, "URL detectada"))          # sigue STARTING: NO debe limpiar
+assert ("out", "primera linea") in list(d2._buf), "se perdió la primera línea"
+d2._on_event(ST(ServiceState.RUNNING)); d2._on_event(ST(ServiceState.STOPPED)); d2._on_event(ST(ServiceState.STARTING))
+assert not list(d2._buf), "nueva ejecución debe limpiar la vista"
+print("live-view regression ok")
+eng.shutdown()

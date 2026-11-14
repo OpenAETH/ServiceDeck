@@ -8,7 +8,7 @@ import enum
 import os
 import shlex
 from dataclasses import dataclass, asdict, fields
-from typing import Callable, Dict, List, Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol, Tuple
 
 
 class ServiceState(str, enum.Enum):
@@ -35,6 +35,7 @@ class ServiceConfig:
     shell: str = "none"          # none | cmd | powershell | bash  (lanzar a través de la terminal)
     autorestart: bool = False
     visible: bool = True
+    autostart: bool = False      # iniciar al abrir ServiceDeck
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -53,15 +54,17 @@ class ServiceStatus:
     started_at: Optional[float] = None
     exit_code: Optional[int] = None
     message: str = ""
+    url: Optional[str] = None    # primera URL http(s) detectada en la salida
 
 
 @dataclass(frozen=True)
 class EngineEvent:
-    kind: str                    # "state" | "log"
+    kind: str                    # "state" | "log" | "output" (línea de stdout/stderr del servicio)
     service_id: Optional[str]
     message: str
     level: str = "info"          # info | ok | warn | error
     status: Optional[ServiceStatus] = None
+    stream: str = ""             # "out" | "err" (solo kind="output")
 
 
 class RegistryAPI(Protocol):
@@ -83,6 +86,7 @@ class EngineAPI(Protocol):
     def status(self, service_id: str) -> ServiceStatus: ...
     def is_active(self, service_id: str) -> bool: ...
     def read_log(self, service_id: str, stream: str = "both", tail: int = 300) -> str: ...
+    def read_log_lines(self, service_id: str, tail: int = 500) -> List[Tuple[str, str]]: ...
     def shutdown(self) -> None: ...
 
 

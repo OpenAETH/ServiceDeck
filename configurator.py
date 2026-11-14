@@ -55,6 +55,10 @@ class Configurator:
                                   expand=True, options=[ft.DropdownOption("false", "Disabled"),
                                                         ft.DropdownOption("true", "Enabled")],
                                   **T.field_style(dense=False))
+        autostart = ft.Dropdown(label="Auto Start", value="true" if cfg and cfg.autostart else "false", expand=True,
+                                options=[ft.DropdownOption("false", "Manual"),
+                                         ft.DropdownOption("true", "Al abrir ServiceDeck")],
+                                **T.field_style(dense=False))
         visible = ft.Dropdown(label="UI Visibility", value="false" if cfg and not cfg.visible else "true",
                               expand=True, options=[ft.DropdownOption("true", "Visible in dashboard"),
                                                     ft.DropdownOption("false", "Hidden")],
@@ -86,7 +90,8 @@ class Configurator:
         def form():
             return dict(name=name.value, alias=alias.value, executable=exe.value, args=args.value,
                         cwd=cwd.value, env=env.value, mode=mode.value, shell=shell.value or "none",
-                        autorestart=autorestart.value == "true", visible=visible.value == "true")
+                        autorestart=autorestart.value == "true", visible=visible.value == "true",
+                        autostart=autostart.value == "true")
 
         def show_err(lines):
             err.value = "\n".join("• " + l for l in lines)
@@ -172,7 +177,7 @@ class Configurator:
         banner = ft.Container(
             T.label("Servicio en ejecución: detenelo para editar su configuración.", 11, T.AMBER),
             padding=10, bgcolor="#2a2312", border_radius=6, visible=locked)
-        for c in (name, alias, exe, mode, shell, args, cwd, env, autorestart, visible):
+        for c in (name, alias, exe, mode, shell, args, cwd, env, autorestart, autostart, visible):
             c.disabled = locked
 
         body = ft.Column([
@@ -184,7 +189,7 @@ class Configurator:
             ft.Row([exe, T.button("Detect", detect, disabled=locked), T.button("Test", test, disabled=locked)],
                    vertical_alignment=ft.CrossAxisAlignment.START),
             interp_box, ft.Row([mode, shell]), args, cwd, env,
-            sec("03 / BEHAVIOR"), ft.Row([autorestart, visible]),
+            sec("03 / BEHAVIOR"), ft.Row([autorestart, autostart, visible]),
             ft.Container(ft.Column([
                 ft.Text("Binding preview", size=11, weight=ft.FontWeight.W_700, color="#a8c9d4"),
                 ft.Row([T.label("Toggle ID:", 11, "#a8c9d4"), p_alias], spacing=6),
