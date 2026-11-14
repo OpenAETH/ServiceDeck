@@ -50,8 +50,11 @@ def panel(content, header=None, fill=False):
 
 
 def field_style(**kw):
-    base = dict(bgcolor=INPUT_BG, border_color=LINE, focused_border_color=CYAN, color=TEXT,
-                border_radius=6, dense=True, text_size=13, content_padding=ft.Padding.all(10),
+    # Flet >= 1.0: border_color / focused_border_color / border_radius están deprecados
+    border = {ft.ControlState.DEFAULT: ft.OutlineInputBorder(side=ft.BorderSide(1, LINE), border_radius=6),
+              ft.ControlState.FOCUSED: ft.OutlineInputBorder(side=ft.BorderSide(1, CYAN), border_radius=6)}
+    base = dict(bgcolor=INPUT_BG, border=border, color=TEXT,
+                dense=True, text_size=13, content_padding=ft.Padding.all(10),
                 label_style=ft.TextStyle(size=11, color="#aab8cb", weight=ft.FontWeight.W_600))
     base.update(kw)
     return base
