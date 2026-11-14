@@ -18,6 +18,15 @@ class Configurator:
                  on_change: Callable[[Optional[str]], None]):
         self.page, self.registry, self.engine, self.on_change = page, registry, engine, on_change
 
+    def _ui(self, fn) -> None:
+        """Ejecuta fn en el loop de la UI (update() desde un hilo suelto no llega al cliente)."""
+        async def run():
+            fn()
+        try:
+            self.page.run_task(run)
+        except Exception:
+            fn()
+
     # ------------------------------------------------------------------ modal
     def open(self, service_id: Optional[str] = None) -> None:
         cfg = self.registry.get(service_id) if service_id else None
@@ -136,12 +145,12 @@ class Configurator:
                     tooltip="Click para usar este intérprete"))
             interp_box.controls = rows or [T.label("No se encontraron intérpretes.", 11, T.AMBER)]
             interp_box.visible = True
-            self.page.update()
+            self._ui(self.page.update)
 
         def detect(_):
             interp_box.controls = [T.label("Buscando intérpretes…", 11, T.CYAN)]
             interp_box.visible = True
-            self.page.update()
+            self._ui(self.page.update)
             wd, ar = cwd.value.strip(), args.value
 
             def work():
@@ -149,7 +158,7 @@ class Configurator:
                     items = interpreters.discover(wd, ar)
                 except Exception as e:           # nunca romper la UI por una detección
                     interp_box.controls = [T.label(f"Error de detección: {e}", 11, T.RED)]
-                    self.page.update()
+                    self._ui(self.page.update)
                     return
                 mods = interpreters.script_imports(wd, ar)
                 render(items, "Imports del script: " + (", ".join(mods) or "—") + "   (click en una fila para usarla)")
@@ -161,10 +170,10 @@ class Configurator:
             if not path:
                 interp_box.controls = [T.label(f"No se encuentra '{exe.value}' en el PATH de ServiceDeck.", 11, T.RED)]
                 interp_box.visible = True
-                return self.page.update()
+                return self._ui(self.page.update)
             interp_box.controls = [T.label("Probando…", 11, T.CYAN)]
             interp_box.visible = True
-            self.page.update()
+            self._ui(self.page.update)
             mods = interpreters.script_imports(wd, args.value)
             threading.Thread(target=lambda: render([interpreters.probe(path, mods, wd, "este Executable")],
                                                    "ServiceDeck ejecutaría:"), daemon=True).start()

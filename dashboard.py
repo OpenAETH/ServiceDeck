@@ -34,21 +34,33 @@ class Dashboard:
         self._lock = threading.RLock()
         self.configurator = Configurator(page, registry, engine, self._configured)
 
-        self.list_view = ft.ListView(spacing=6, expand=True, padding=ft.Padding.all(10))
-        self.inspector = ft.Container(padding=ft.Padding.symmetric(vertical=8, horizontal=12))
-        self.events = ft.ListView(spacing=0, auto_scroll=True, expand=True, padding=ft.Padding.all(8))
-        self.logview = ft.ListView(spacing=0, auto_scroll=True, expand=True, padding=ft.Padding.all(8), visible=False)
+        # --- estado compartido con hilos del motor: SOLO datos; los controles se tocan en _flush_now (hilo de la UI)
+        self._plock = threading.RLock()
+        self._ev_q: list = []                              # entradas de consola pendientes de dibujar
+        self._pending: list = []                           # líneas de salida pendientes de dibujar
+        self._toasts: list = []
+        self._need_refresh = False
+        self._rerender_needed = False
+        self._scheduled = False
         self._buf = collections.deque(maxlen=3000)        # (stream, línea) del servicio seleccionado
-        self._pending: list = []                          # líneas nuevas aún sin dibujar
-        self._plock = threading.Lock()
+        self._entries: list = []                           # entradas dibujadas de la consola de eventos
         self._filter = ""
         self._follow = True
-        self._ui_err_reported = False
+        self._level_mode = 0                               # 0 todo · 1 warn+ · 2 error
         self._prev_state: dict = {}
+        self._clip = None
+
+        self.list_view = ft.ListView(spacing=6, expand=True, padding=ft.Padding.all(10))
+        self.inspector = ft.Container(padding=ft.Padding.symmetric(vertical=8, horizontal=12))
+        self.events = ft.ListView(spacing=1, auto_scroll=True, expand=True, padding=ft.Padding.all(8))
+        self.logview = ft.ListView(spacing=0, auto_scroll=True, expand=True, padding=ft.Padding.all(8))
         self.filter_tf = ft.TextField(hint_text="filtrar…", width=130, visible=False, on_change=self._on_filter,
                                       **T.field_style(text_size=11, content_padding=ft.Padding.symmetric(vertical=4, horizontal=8)))
         self.follow_btn = T.button("⇣ Follow", self._toggle_follow, "primary", small=True)
         self.follow_btn.visible = False
+        self.level_btn = T.button("LEVEL: ALL", self._cycle_level, small=True)
+        self.sel_events = ft.SelectionArea(self.events, expand=True)     # selección multilínea con el mouse
+        self.sel_log = ft.SelectionArea(self.logview, expand=True)
         self.tab_events = ft.Container()
         self.tab_log = ft.Container()
         self.stat = {k: ft.Text("0", size=15, weight=ft.FontWeight.W_700) for k in ("total", "running", "stopped", "errors")}
@@ -67,7 +79,7 @@ class Dashboard:
         topbar = ft.Container(ft.Row([
             ft.Row([ft.Text("AETHERYON", size=15, weight=ft.FontWeight.W_800, color=T.TEXT),
                     ft.Text("ServiceDeck", size=15, weight=ft.FontWeight.W_800, color=T.CYAN),
-                    T.label("V1.0 · LOCAL PROCESS CONTROL", 9, spacing=1.2)], spacing=7,
+                    T.label("V1.4 · LOCAL PROCESS CONTROL", 9, spacing=1.2)], spacing=7,
                    vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([stat("REGISTERED", "total"), stat("RUNNING", "running"),
                     stat("STOPPED", "stopped"), stat("ERRORS", "errors")], spacing=8),
@@ -83,8 +95,11 @@ class Dashboard:
         self.registry_panel.expand = True
         self.inspector_panel = T.panel(self.inspector, self._head("Service Inspector", "SELECTED INSTANCE"))
         self.console_panel = T.panel(
-            ft.Container(ft.Stack([self.events, self.logview], expand=True), bgcolor=T.LOG_BG, expand=True),
-            ft.Row([self._tabs(), ft.Row([self.filter_tf, self.follow_btn, T.button("Clear", self._clear_console, small=True)],
+            ft.Container(ft.Stack([self.sel_events, self.sel_log], expand=True),
+                         bgcolor=T.LOG_BG, expand=True),
+            ft.Row([self._tabs(), ft.Row([self.filter_tf, self.follow_btn, self.level_btn,
+                                          T.button("⧉ Copy", self._copy, small=True),
+                                          T.button("Clear", self._clear_console, small=True)],
                                          spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             fill=True)
@@ -97,11 +112,16 @@ class Dashboard:
                               border=ft.Border.only(top=ft.BorderSide(1, T.LINE)))
         self._apply_layout()
         self.page.on_resize = lambda e: self._apply_layout(update=True)
+        try:                                          # servicio de portapapeles (Flet 1.0)
+            self._clip = ft.Clipboard()
+            self.page.services.append(self._clip)
+        except Exception:
+            self._clip = None
         self._set_tab("events", update=False)
-        self.refresh()
+        self._need_refresh = True
         self.log("ServiceDeck initialized.", "info")
         self.log("Registry loaded.", "ok")
-        threading.Thread(target=self._flush_loop, daemon=True).start()
+        self._flush_now(update=False)
         return ft.Column([topbar, self.body, footer], spacing=0, expand=True)
 
     def _head(self, title, sub):
@@ -141,6 +161,12 @@ class Dashboard:
 
     # ---------------------------------------------------------------- render
     def refresh(self) -> None:
+        """Pide redibujar lista/estadísticas/inspector (seguro desde cualquier hilo)."""
+        with self._plock:
+            self._need_refresh = True
+        self._kick()
+
+    def _refresh_now(self) -> None:
         with self._lock:
             services = self.registry.list()
             statuses = {s.id: self.engine.status(s.id) for s in services}
@@ -156,10 +182,6 @@ class Dashboard:
                 self.selected = None
             self._render_inspector()
             self._render_tabs()
-            try:
-                self.page.update()
-            except Exception:
-                pass
 
     def _row(self, cfg, st) -> ft.Control:
         busy = st.state in (ServiceState.STARTING, ServiceState.STOPPING)
@@ -239,25 +261,151 @@ class Dashboard:
 
     def _set_tab(self, name: str, update: bool = True) -> None:
         self.tab = name
-        self.events.visible = name == "events"
-        self.logview.visible = name == "log"
+        self.sel_events.visible = name == "events"
+        self.sel_log.visible = name == "log"
         self.filter_tf.visible = self.follow_btn.visible = name == "log"
+        self.level_btn.visible = name == "events"
         self._render_tabs()
         if name == "log":
             self._rerender()
         if update:
-            try:
-                self.page.update()
-            except Exception:
-                pass
+            self._safe_page_update()
 
-    # ---- salida en vivo del servicio seleccionado (event-driven, sin botón de refresco)
+    # ---- helpers de hilo/UI
+    def _safe(self, ctl) -> None:
+        try:
+            ctl.update()
+        except Exception:
+            pass
+
+    def _safe_page_update(self) -> None:
+        try:
+            self.page.update()
+        except Exception:
+            pass
+
+    def _kick(self) -> None:
+        """Agenda UN flush en el loop de la UI (coalesce ~80 ms). Es la única vía por la que
+        los hilos del motor llegan a la pantalla: update() desde un hilo suelto no despierta
+        al cliente hasta el siguiente click."""
+        with self._plock:
+            if self._scheduled:
+                return
+            self._scheduled = True
+        try:
+            self.page.run_task(self._flush_async)
+        except Exception:
+            with self._plock:
+                self._scheduled = False
+
+    async def _flush_async(self) -> None:
+        await asyncio.sleep(0.08)
+        self._flush_now()
+
+    def _flush_now(self, update: bool = True) -> None:
+        with self._plock:
+            self._scheduled = False
+            need_ref, self._need_refresh = self._need_refresh, False
+            rerender, self._rerender_needed = self._rerender_needed, False
+            evs, self._ev_q = self._ev_q, []
+            out, self._pending = self._pending, []
+            toasts, self._toasts = self._toasts, []
+        try:
+            if need_ref:
+                self._refresh_now()
+                self._render_tabs()
+            if evs:
+                for e in evs:
+                    self._add_entry(e)
+                del self._entries[:-400]
+                self.events.controls = [e["row"] for e in self._entries]
+            if self.tab == "log":
+                if rerender:
+                    self._rerender(update=False)
+                elif out:
+                    if self.logview.controls and isinstance(self.logview.controls[0], ft.Text) and \
+                            self.logview.controls[0].value.startswith(("(sin salida", "Seleccioná")):
+                        self.logview.controls.clear()
+                    self.logview.controls.extend(self._line_ctl(s, l) for s, l in out if self._match(l))
+                    del self.logview.controls[:-1500]
+            if update:
+                if need_ref or rerender:
+                    self._safe_page_update()
+                else:
+                    if evs:
+                        self._safe(self.events)
+                    if out and self.tab == "log":
+                        self._safe(self.logview)
+            for text, color in toasts:
+                self._show_toast(text, color)
+        except Exception as e:                           # nunca silencioso
+            self._ev_q.append(self._mk_entry("error", None, "UI", f"error al dibujar: {e}"))
+
+    def _show_toast(self, text: str, color: str) -> None:
+        try:
+            self.page.show_dialog(ft.SnackBar(ft.Text(text, color=T.TEXT, size=12), bgcolor=color, duration=4500,
+                                              show_close_icon=True))
+        except Exception:
+            pass
+
+    # ---- consola de eventos (entradas estructuradas, con deduplicado y filtro por nivel)
+    GLYPH = {"ok": "✓", "info": "•", "warn": "▲", "error": "✗"}
+    COLOR = {"ok": T.GREEN, "info": T.CYAN, "warn": T.AMBER, "error": T.RED}
+    RANK = {"info": 0, "ok": 0, "warn": 1, "error": 2}
+
+    def _mk_entry(self, level, sid, alias, text):
+        return {"ts": time.strftime("%H:%M:%S"), "level": level, "sid": sid, "alias": alias, "text": text, "count": 1}
+
+    def log(self, message: str, level: str = "info", sid: Optional[str] = None, alias: Optional[str] = None) -> None:
+        """Seguro desde cualquier hilo: encola y agenda el dibujo."""
+        with self._plock:
+            self._ev_q.append(self._mk_entry(level, sid, alias, message))
+        self._kick()
+
+    def _add_entry(self, e: dict) -> None:
+        last = self._entries[-1] if self._entries else None
+        if last and (last["sid"], last["alias"], last["text"], last["level"]) == (e["sid"], e["alias"], e["text"], e["level"]):
+            last["count"] += 1
+            last["ts"] = e["ts"]
+            self._paint(last)
+            return
+        e["row"] = ft.Container(padding=ft.Padding.symmetric(vertical=1, horizontal=2), border_radius=3)
+        self._paint(e)
+        self._entries.append(e)
+
+    def _paint(self, e: dict) -> None:
+        col = self.COLOR.get(e["level"], T.MUTED)
+        cells = [T.label(e["ts"], 10, T.MUTED, mono=True),
+                 ft.Text(self.GLYPH.get(e["level"], "•"), size=11, color=col, weight=ft.FontWeight.W_700)]
+        if e["alias"]:
+            chip = _chip(e["alias"], col if e["level"] in ("warn", "error") else T.CYAN)
+            if e["sid"]:
+                chip.on_click = lambda _, i=e["sid"]: self._select(i)
+                chip.tooltip = "Ver este servicio"
+            cells.append(chip)
+        cells.append(ft.Text(e["text"], size=11, color=col if e["level"] != "info" else T.TEXT, font_family=T.MONO,
+                             expand=True))
+        if e["count"] > 1:
+            cells.append(ft.Container(ft.Text(f"×{e['count']}", size=10, color=T.BG, weight=ft.FontWeight.W_700),
+                                      bgcolor=col, border_radius=8, padding=ft.Padding.symmetric(horizontal=6)))
+        e["row"].content = ft.Row(cells, spacing=6, vertical_alignment=ft.CrossAxisAlignment.START)
+        e["row"].bgcolor = "#2a1318" if e["level"] == "error" else None
+        e["row"].visible = self.RANK.get(e["level"], 0) >= self._level_mode
+
+    def _cycle_level(self, _=None) -> None:
+        self._level_mode = (self._level_mode + 1) % 3
+        self.level_btn.content.value = ["LEVEL: ALL", "LEVEL: WARN+", "LEVEL: ERROR"][self._level_mode]
+        for e in self._entries:
+            e["row"].visible = self.RANK.get(e["level"], 0) >= self._level_mode
+        self._safe_page_update()
+
+    # ---- salida en vivo del servicio seleccionado
     def _line_ctl(self, stream: str, line: str) -> ft.Control:
         color = T.AMBER if stream == "err" else T.TEXT
         low = line.lower()
         if stream == "err" and any(w in low for w in ("error", "traceback", "exception", "critical")):
             color = T.RED
-        return ft.Text(line, size=11, color=color, font_family=T.MONO, selectable=True)
+        return ft.Text(line, size=11, color=color, font_family=T.MONO)     # selección: la da SelectionArea
 
     def _match(self, line: str) -> bool:
         return not self._filter or self._filter in line.lower()
@@ -267,21 +415,19 @@ class Dashboard:
             self._buf.clear()
             self._pending.clear()
             self._buf.extend(self.engine.read_log_lines(sid, 500))
+            self._rerender_needed = True
 
-    def _rerender(self) -> None:
+    def _rerender(self, update: bool = True) -> None:
         with self._plock:
             items = [(s, l) for s, l in self._buf if self._match(l)][-1500:]
             self._pending.clear()
         if not self.selected:
             self.logview.controls = [T.label("Seleccioná un servicio para ver su salida en vivo.", 12)]
         else:
-            self.logview.controls = [self._line_ctl(s, l) for s, l in items] or \
-                [T.label("(sin salida todavía)", 11)]
+            self.logview.controls = [self._line_ctl(s, l) for s, l in items] or [T.label("(sin salida todavía)", 11)]
         self.logview.auto_scroll = self._follow
-        try:
-            self.logview.update()
-        except Exception:
-            pass
+        if update:
+            self._safe(self.logview)
 
     def _on_filter(self, e) -> None:
         self._filter = (e.control.value or "").strip().lower()
@@ -292,55 +438,55 @@ class Dashboard:
         self.follow_btn.bgcolor = T.CYAN if self._follow else T.PANEL2
         self.follow_btn.content.color = "#06141c" if self._follow else T.TEXT
         self.logview.auto_scroll = self._follow
-        try:
-            self.page.update()
-        except Exception:
-            pass
+        self._safe_page_update()
 
-    def _flush_loop(self) -> None:
-        """Dibuja en lotes (5/s) las líneas que llegan del motor."""
-        while True:
-            time.sleep(0.2)
-            try:
-                with self._plock:
-                    new, self._pending = self._pending, []
-                if not new or self.tab != "log":
+    # ---- copiar / limpiar
+    def _console_text(self) -> str:
+        if self.tab == "events":
+            rows = []
+            for e in self._entries:
+                if self.RANK.get(e["level"], 0) < self._level_mode:
                     continue
-                if self.logview.controls and isinstance(self.logview.controls[0], ft.Text) and \
-                        self.logview.controls[0].value.startswith(("(sin salida", "Seleccioná")):
-                    self.logview.controls.clear()
-                self.logview.controls.extend(self._line_ctl(s, l) for s, l in new if self._match(l))
-                del self.logview.controls[:-1500]
-                self.logview.update()
-            except Exception as e:                       # no tragarse el error en silencio
-                if not self._ui_err_reported:
-                    self._ui_err_reported = True
-                    self.log(f"UI: error actualizando el log en vivo: {e}", "error")
+                who = f"{e['alias']}: " if e["alias"] else ""
+                n = f" (×{e['count']})" if e["count"] > 1 else ""
+                rows.append(f"[{e['ts']}] {e['level'].upper():5s} {who}{e['text']}{n}")
+            return "\n".join(rows)
+        with self._plock:
+            return "\n".join(l for _, l in self._buf if self._match(l))
 
-    def _open(self, url) -> None:
-        if url and url.startswith(("http://", "https://")):
-            self.log(f"Abriendo {url}", "info")
-            threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+    def _copy(self, _=None) -> None:
+        text = self._console_text()
+        if not text:
+            return self._show_toast("No hay nada para copiar.", T.PANEL2)
+        n = text.count("\n") + 1
+        self.page.run_task(self._copy_async, text, n)
 
-    def log(self, message: str, level: str = "info") -> None:
-        color = {"ok": T.GREEN, "info": T.CYAN, "warn": T.AMBER, "error": T.RED}.get(level, T.MUTED)
-        self.events.controls.append(ft.Text(f"[{time.strftime('%H:%M:%S')}] {message}", size=11, color=color,
-                                            font_family=T.MONO, selectable=True))
-        del self.events.controls[:-200]
+    async def _copy_async(self, text: str, n: int) -> None:
         try:
-            self.events.update()
-        except Exception:
-            pass
+            if self._clip is None:
+                raise RuntimeError("portapapeles no disponible")
+            await self._clip.set(text)
+            self._show_toast(f"Copiadas {n} líneas al portapapeles", "#0f3d2e")
+        except Exception as e:
+            self._show_toast(f"No se pudo copiar: {e}", "#4a1b22")
 
     def _clear_console(self, _=None) -> None:
         if self.tab == "events":
-            self.events.controls.clear()
-            self.events.update()
+            with self._plock:
+                self._entries.clear()
+                self._ev_q.clear()
+            self.events.controls = []
+            self._safe(self.events)
         else:
             with self._plock:
                 self._buf.clear()
                 self._pending.clear()
             self._rerender()
+
+    def _open(self, url) -> None:
+        if url and url.startswith(("http://", "https://")):
+            self.log(f"Abriendo {url}", "info")
+            threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
     # ---------------------------------------------------------------- acciones
     def _toggle(self, sid: str, control: ft.Switch) -> None:
@@ -383,25 +529,36 @@ class Dashboard:
             self.log("Service removed", "warn")
         self.refresh()
 
-    # ---------------------------------------------------------------- engine → UI
+    # ---------------------------------------------------------------- engine → UI (hilos del motor: solo datos)
     def _on_event(self, ev: EngineEvent) -> None:
         if ev.kind == "output":
             if ev.service_id == self.selected:
                 with self._plock:
                     self._buf.append((ev.stream, ev.message))
                     self._pending.append((ev.stream, ev.message))
+                self._kick()
             return
-        self.log(ev.message if ev.kind == "log" else f"{self._alias(ev.service_id)}: {ev.message}", ev.level)
+        sid = ev.service_id
+        alias = self._alias(sid) if sid else None
+        text = ev.message
+        if alias and text.startswith(alias + ": "):
+            text = text[len(alias) + 2:]
+        with self._plock:
+            self._ev_q.append(self._mk_entry(ev.level, sid, alias, text))
         if ev.kind == "state":
-            prev = self._prev_state.get(ev.service_id)
+            prev = self._prev_state.get(sid)
             now = ev.status.state if ev.status else None
-            self._prev_state[ev.service_id] = now
-            if ev.service_id == self.selected and now == ServiceState.STARTING and prev != ServiceState.STARTING:
-                with self._plock:                         # nueva ejecución (transición a STARTING): vista limpia
-                    self._buf.clear()
+            self._prev_state[sid] = now
+            with self._plock:
+                self._need_refresh = True
+                if sid == self.selected and now == ServiceState.STARTING and prev != ServiceState.STARTING:
+                    self._buf.clear()                     # nueva ejecución: vista limpia
                     self._pending.clear()
-                self._rerender()
-            self.refresh()
+                    self._rerender_needed = True
+                if now == ServiceState.ERROR and prev != ServiceState.ERROR:
+                    self._toasts.append((f"{alias}: {text}", "#4a1b22"))
+        self._kick()
+
 
     def _alias(self, sid) -> str:
         cfg = self.registry.get(sid) if sid else None

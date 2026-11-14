@@ -8,7 +8,9 @@ from dashboard import Dashboard
 
 d = tempfile.mkdtemp(); work = tempfile.mkdtemp(); open(work+"/app.py","w").write("import subprocess,sys,time\nsubprocess.Popen([sys.executable,\"-c\",\"import time;time.sleep(600)\"])\nprint(\"hello\",flush=True);time.sleep(600)\n")
 reg = ServiceRegistry(d + "/services.json"); eng = ProcessEngine(d); reg.set_lock_guard(eng.is_active)
+import asyncio
 page = MagicMock(); page.window = MagicMock(); page.width = 1280; page.height = 720
+page.run_task.side_effect = lambda h, *a, **k: asyncio.run(h(*a, **k))
 dash = Dashboard(page, reg, eng); root = dash.build()
 shown = []; page.show_dialog.side_effect = shown.append
 dash.configurator.open()                       # construye el modal completo
@@ -57,4 +59,19 @@ assert ("out", "primera linea") in list(d2._buf), "se perdió la primera línea"
 d2._on_event(ST(ServiceState.RUNNING)); d2._on_event(ST(ServiceState.STOPPED)); d2._on_event(ST(ServiceState.STARTING))
 assert not list(d2._buf), "nueva ejecución debe limpiar la vista"
 print("live-view regression ok")
+
+# --- v1.4: consola de eventos (dedupe, nivel, copiado) y flush por el loop de la UI
+d3 = _dm.Dashboard(page, reg, eng); d3.build()
+for _ in range(3):
+    d3.log("puerto ocupado", "warn", sid=cfg.id, alias="mi_servicio")
+d3.log("todo bien", "ok"); d3.log("falló", "error", sid=cfg.id, alias="mi_servicio")
+assert page.run_task.called                                   # los hilos agendan en el loop de la UI
+assert len(d3._entries) >= 3 and d3._entries[-3]["count"] == 3, [ (e["text"], e["count"]) for e in d3._entries]
+txt = d3._console_text(); assert "WARN  mi_servicio: puerto ocupado (×3)" in txt and "ERROR mi_servicio: falló" in txt, txt
+d3._cycle_level(); d3._cycle_level()                           # nivel ERROR
+assert [e["text"] for e in d3._entries if e["row"].visible] == ["falló"]
+assert d3._console_text().strip().endswith("falló") and "todo bien" not in d3._console_text()
+d3.selected = cfg.id; d3._load_buffer(cfg.id); d3._set_tab("log", update=False); d3._rerender(update=False)
+assert "\n".join(l for _, l in d3._buf) == d3._console_text()   # copiar en LOG = todo el buffer filtrado
+print("events/copy ok")
 eng.shutdown()

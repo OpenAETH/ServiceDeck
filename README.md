@@ -40,6 +40,11 @@ El `python` que ve ServiceDeck puede diferir del de tu terminal (venv, conda, ot
 - **Open ↗:** se detecta la primera URL http(s) que imprime el servicio (0.0.0.0 → 127.0.0.1, prioriza loopback); botón en la fila y en el Inspector.
 - **Auto Start:** por servicio ("Al abrir ServiceDeck"); se inician escalonados, omitiendo los ya activos.
 
+## v1.4 — UI en vivo real, consola de eventos, copiado
+- **Fix de refresco:** los eventos del motor llegan desde hilos; `update()` desde un hilo suelto no despierta al cliente de Flet hasta el siguiente click (por eso el texto aparecía al volver de "Logs"). Ahora los hilos solo encolan datos y un único flush se agenda en el loop de la UI (`page.run_task`, coalescido ~80 ms).
+- **Consola de eventos:** entradas estructuradas (hora · icono · alias clickeable · mensaje), deduplicado con contador ×N, filtro de nivel (ALL / WARN+ / ERROR), errores resaltados, y toast al caer un servicio (ERROR).
+- **Copiar:** selección multilínea con el mouse (SelectionArea) y botón **⧉ Copy** que copia todo lo visible de la pestaña activa (eventos o log, respetando filtros).
+
 ## Pruebas
     python tests/test_engine.py -v         # 10 pruebas con procesos reales
     python tests/ui_logic_smoke.py          # modal → guardar → toggle → PID → stop (página simulada)
